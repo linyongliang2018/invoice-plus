@@ -21,11 +21,13 @@ import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,6 +44,7 @@ public class InvoiceFolderWorkbookApp {
     private static final Path XML_DIR = Path.of("C:\\Users\\40696\\Desktop\\京东发票-京东发票明细");
     private static final Path OUTPUT_EXCEL = Path.of("D:\\发票整理-多sheet.xlsx");
     private static final DateTimeFormatter ISSUE_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final LocalDateTime MIN_ISSUE_TIME = LocalDate.parse("2024-06-18").atStartOfDay();
 
     /**
      * 只影响 sheet4 分组；sheet5 用于展示这些号码在目录中出现的发票。
@@ -129,6 +132,12 @@ public class InvoiceFolderWorkbookApp {
             }
         }
         List<InvoiceRecord> invoices = new ArrayList<>(unique.values());
+        int beforeDateCount = (int) invoices.stream()
+                .filter(it -> safeIssueTime(it).isBefore(MIN_ISSUE_TIME))
+                .count();
+        invoices = invoices.stream()
+                .filter(it -> !safeIssueTime(it).isBefore(MIN_ISSUE_TIME))
+                .collect(Collectors.toList());
 
         List<InvoiceRecord> sheet1 = invoices.stream()
                 .filter(it -> it.totalAmWithoutTax().compareTo(new BigDecimal("100")) > 0)
@@ -176,12 +185,21 @@ public class InvoiceFolderWorkbookApp {
                 .filter(it -> !excludeSet.contains(it.invoiceNumber()))
                 .collect(Collectors.toList());
 
-        List<GroupRow> sheet4Rows = buildSheet4Groups(sheet4Candidates);
+        List<GroupRow> allGroupRows = buildSheet4Groups(sheet4Candidates);
+        List<GroupRow> sheet4Rows = allGroupRows.stream()
+                .filter(row -> !row.groupTag().startsWith("零散不足100"))
+                .collect(Collectors.toList());
+        List<InvoiceRecord> sheet6 = allGroupRows.stream()
+                .filter(row -> row.groupTag().startsWith("零散不足100"))
+                .flatMap(row -> row.invoices().stream())
+                .sorted(Comparator.comparing(InvoiceFolderWorkbookApp::safeIssueTime).reversed()
+                        .thenComparing(InvoiceRecord::invoiceNumber))
+                .collect(Collectors.toList());
 
-        writeWorkbook(sheet1, sheet2, sheet3, sheet4Rows, sheet5, OUTPUT_EXCEL);
+        writeWorkbook(sheet1, sheet2, sheet3, sheet4Rows, sheet5, sheet6, OUTPUT_EXCEL);
 
-        System.out.printf("导出完成：总发票 %d, sheet1=%d, sheet2=%d, sheet3=%d, sheet4组明细行=%d, sheet5=%d%n",
-                invoices.size(), sheet1.size(), sheet2.size(), sheet3.size(), sheet4Rows.size(), sheet5.size());
+        System.out.printf("导出完成：总发票 %d（已排除开票时间早于2024-06-18的 %d 张）, sheet1=%d, sheet2=%d, sheet3=%d, sheet4组明细行=%d, sheet5=%d, sheet6=%d%n",
+                invoices.size(), beforeDateCount, sheet1.size(), sheet2.size(), sheet3.size(), sheet4Rows.size(), sheet5.size(), sheet6.size());
         System.out.println("输出文件：" + OUTPUT_EXCEL.toAbsolutePath());
     }
 
@@ -256,15 +274,18 @@ public class InvoiceFolderWorkbookApp {
     private static List<GroupRow> buildSheet4Groups(List<InvoiceRecord> invoices) {
         Map<String, List<InvoiceRecord>> bySeller = invoices.stream()
                 .collect(Collectors.groupingBy(InvoiceRecord::sellerIdNum, LinkedHashMap::new, Collectors.toList()));
+        List<String> sortedSellerIds = new ArrayList<>(bySeller.keySet());
+        sortedSellerIds.sort(Comparator.nullsLast(String::compareTo));
 
         List<GroupRow> rows = new ArrayList<>();
         int groupNo = 1;
 
-        for (Map.Entry<String, List<InvoiceRecord>> entry : bySeller.entrySet()) {
-            List<InvoiceRecord> list = new ArrayList<>(entry.getValue());
+        for (String sellerId : sortedSellerIds) {
+            List<InvoiceRecord> list = new ArrayList<>(bySeller.getOrDefault(sellerId, Collections.emptyList()));
             list.sort(Comparator.comparing(InvoiceRecord::totalAmWithoutTax)
                     .thenComparing(InvoiceFolderWorkbookApp::safeIssueTime));
 
+            List<GroupRow> sellerRows = new ArrayList<>();
             List<InvoiceRecord> current = new ArrayList<>();
             BigDecimal sum = BigDecimal.ZERO;
             for (InvoiceRecord inv : list) {
@@ -278,14 +299,28 @@ public class InvoiceFolderWorkbookApp {
                 current.add(inv);
                 sum = sum.add(amount);
                 if (sum.compareTo(new BigDecimal("100")) >= 0) {
-                    rows.add(GroupRow.of(groupNo++, "可凑满100+", current, sum));
+                    sellerRows.add(GroupRow.of(0, "可凑满100+", current, sum));
                     current = new ArrayList<>();
                     sum = BigDecimal.ZERO;
                 }
             }
 
             if (!current.isEmpty()) {
-                rows.add(GroupRow.of(groupNo++, "零散不足100", current, sum));
+                if (!sellerRows.isEmpty()) {
+                    // 同 SellerIdNum 已有可并入分组时，把不足100尾单并入最近一个分组（最后一个）
+                    GroupRow last = sellerRows.get(sellerRows.size() - 1);
+                    List<InvoiceRecord> mergedInvoices = new ArrayList<>(last.invoices());
+                    mergedInvoices.addAll(current);
+                    BigDecimal mergedSum = last.groupSum().add(sum);
+                    sellerRows.set(sellerRows.size() - 1, GroupRow.of(0, last.groupTag(), mergedInvoices, mergedSum));
+                } else {
+                    // 没有同 SellerIdNum 可并入分组，且金额不足100，才保留零散不足100
+                    sellerRows.add(GroupRow.of(0, "零散不足100", current, sum));
+                }
+            }
+
+            for (GroupRow sellerRow : sellerRows) {
+                rows.add(GroupRow.of(groupNo++, sellerRow.groupTag(), sellerRow.invoices(), sellerRow.groupSum()));
             }
         }
 
@@ -297,6 +332,7 @@ public class InvoiceFolderWorkbookApp {
                                       List<InvoiceRecord> sheet3,
                                       List<GroupRow> sheet4Rows,
                                       List<InvoiceRecord> sheet5,
+                                      List<InvoiceRecord> sheet6,
                                       Path output) throws Exception {
         Path parent = output.toAbsolutePath().getParent();
         if (parent != null) {
@@ -309,6 +345,7 @@ public class InvoiceFolderWorkbookApp {
             Sheet s3 = wb.createSheet("sheet3_与sheet1冲突");
             Sheet s4 = wb.createSheet("sheet4_凑100分组");
             Sheet s5 = wb.createSheet("sheet5_sheet4排除列表命中");
+            Sheet s6 = wb.createSheet("sheet6_零散不足100");
 
             Styles styles = buildStyles(wb);
             writeInvoiceSheet(s1, sheet1, BASE_HEADERS, styles);
@@ -316,6 +353,7 @@ public class InvoiceFolderWorkbookApp {
             writeInvoiceSheet(s3, sheet3, BASE_HEADERS, styles);
             writeSheet4(s4, sheet4Rows, styles);
             writeInvoiceSheet(s5, sheet5, BASE_HEADERS, styles);
+            writeInvoiceSheet(s6, sheet6, BASE_HEADERS, styles);
 
             try (OutputStream out = Files.newOutputStream(output)) {
                 wb.write(out);
@@ -382,7 +420,10 @@ public class InvoiceFolderWorkbookApp {
 
             int detailStart = rowCursor;
             int detailLines = 0;
-            for (InvoiceRecord inv : group.invoices()) {
+            List<InvoiceRecord> orderedInvoices = new ArrayList<>(group.invoices());
+            orderedInvoices.sort(Comparator.comparing(InvoiceFolderWorkbookApp::safeIssueTime)
+                    .thenComparing(InvoiceRecord::invoiceNumber));
+            for (InvoiceRecord inv : orderedInvoices) {
                 for (String item : inv.items()) {
                     Row r = sheet.createRow(rowCursor++);
                     detailLines++;
