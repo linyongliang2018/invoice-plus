@@ -257,6 +257,7 @@ public class InvoiceFolderWorkbookApp {
             if (items.isEmpty()) {
                 items.add("");
             }
+            items = dedupeItems(items);
 
             return new InvoiceRecord(
                     taxBureauName.trim(),
@@ -420,24 +421,21 @@ public class InvoiceFolderWorkbookApp {
 
             int detailStart = rowCursor;
             int detailLines = 0;
-            List<InvoiceRecord> orderedInvoices = new ArrayList<>(group.invoices());
-            orderedInvoices.sort(Comparator.comparing(InvoiceFolderWorkbookApp::safeIssueTime)
-                    .thenComparing(InvoiceRecord::invoiceNumber));
-            for (InvoiceRecord inv : orderedInvoices) {
-                for (String item : inv.items()) {
-                    Row r = sheet.createRow(rowCursor++);
-                    detailLines++;
-                    for (int c = 0; c < SHEET4_HEADERS.length; c++) {
-                        r.createCell(c).setCellStyle(pair.bodyStyle());
-                    }
-                    r.getCell(2).setCellValue(inv.taxBureauName());
-                    r.getCell(3).setCellValue(inv.invoiceNumber());
-                    r.getCell(4).setCellValue(inv.issueTime());
-                    r.getCell(5).setCellValue(inv.sellerIdNum());
-                    r.getCell(6).setCellValue(inv.sellerName());
-                    r.getCell(7).setCellValue(item);
-                    r.getCell(8).setCellValue(inv.totalAmWithoutTax().doubleValue());
+            List<DetailLine> detailLinesOrdered = buildDetailLinesSortedByIssueTime(group.invoices());
+            for (DetailLine line : detailLinesOrdered) {
+                InvoiceRecord inv = line.invoice();
+                Row r = sheet.createRow(rowCursor++);
+                detailLines++;
+                for (int c = 0; c < SHEET4_HEADERS.length; c++) {
+                    r.createCell(c).setCellStyle(pair.bodyStyle());
                 }
+                r.getCell(2).setCellValue(inv.taxBureauName());
+                r.getCell(3).setCellValue(inv.invoiceNumber());
+                r.getCell(4).setCellValue(inv.issueTime());
+                r.getCell(5).setCellValue(inv.sellerIdNum());
+                r.getCell(6).setCellValue(inv.sellerName());
+                r.getCell(7).setCellValue(line.item());
+                r.getCell(8).setCellValue(inv.totalAmWithoutTax().doubleValue());
             }
             int detailEnd = detailStart + Math.max(detailLines - 1, 0);
             writeMergedText(sheet, 0, detailStart, detailEnd, "G" + group.groupNo(), pair.bodyStyle());
@@ -571,12 +569,63 @@ public class InvoiceFolderWorkbookApp {
         }
     }
 
+    private static List<DetailLine> buildDetailLinesSortedByIssueTime(List<InvoiceRecord> invoices) {
+        List<DetailLine> lines = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (InvoiceRecord inv : invoices) {
+            for (String item : inv.items()) {
+                String key = inv.invoiceNumber() + "|" + normItem(item);
+                if (!seen.add(key)) {
+                    continue;
+                }
+                lines.add(new DetailLine(inv, item));
+            }
+        }
+        lines.sort(Comparator.comparing((DetailLine line) -> safeIssueTime(line.invoice()))
+                .thenComparing(line -> line.invoice().invoiceNumber())
+                .thenComparing(DetailLine::item));
+        return lines;
+    }
+
+    private static List<String> dedupeItems(List<String> items) {
+        List<String> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String item : items) {
+            String key = normItem(item);
+            if (seen.add(key)) {
+                result.add(item);
+            }
+        }
+        return result.isEmpty() ? List.of("") : result;
+    }
+
     private static LocalDateTime safeIssueTime(InvoiceRecord inv) {
-        try {
-            return LocalDateTime.parse(inv.issueTime(), ISSUE_TIME_FORMAT);
-        } catch (DateTimeParseException ex) {
+        return parseIssueTime(inv.issueTime());
+    }
+
+    private static LocalDateTime parseIssueTime(String issueTime) {
+        if (issueTime == null || issueTime.isBlank()) {
             return LocalDateTime.MIN;
         }
+        String value = issueTime.trim();
+        try {
+            return LocalDateTime.parse(value, ISSUE_TIME_FORMAT);
+        } catch (DateTimeParseException ignored) {
+            // try other common formats
+        }
+        try {
+            return LocalDateTime.parse(value, DateTimeFormatter.ISO_LOCAL_DATE_TIME);
+        } catch (DateTimeParseException ignored) {
+            // continue
+        }
+        try {
+            return LocalDate.parse(value, DateTimeFormatter.ISO_LOCAL_DATE).atStartOfDay();
+        } catch (DateTimeParseException ignored) {
+            return LocalDateTime.MIN;
+        }
+    }
+
+    private record DetailLine(InvoiceRecord invoice, String item) {
     }
 
     private static String normItem(String item) {
