@@ -15,7 +15,7 @@ All notable changes to this project are documented in this file.
 - Upgraded `pom.xml` to a complete Maven Java 17 project setup with build plugins.
 - Added dependencies: Apache POI, PDFBox, Jakarta Mail, and Jsoup.
 - Updated PDF conversion workflow:
-  - Group outputs by configured person keywords (currently supports `谭惠仪` and `林儒勋`, extensible).
+  - Group outputs by configured person keywords (extensible).
   - Output only one level of group folder (no per-PDF subfolder).
   - Merge multi-page PDFs into one vertically stitched long image (`<pdfName>.png`).
 
