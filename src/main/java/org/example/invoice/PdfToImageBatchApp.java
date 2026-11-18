@@ -49,7 +49,7 @@ public class PdfToImageBatchApp {
 
     static {
         PERSON_GROUPS.put("张三", List.of("张三"));
-        PERSON_GROUPS.put("李四", List.of("李四", "李四", "李四"));
+        PERSON_GROUPS.put("李四", List.of("李四"));
         // 示例：PERSON_GROUPS.put("张三", List.of("张三", "张叁"));
     }
 
